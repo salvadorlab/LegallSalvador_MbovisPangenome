@@ -1,0 +1,1033 @@
+---
+title: "Aim3_MbovisPangenome"
+author: "Noah Legall"
+date: '2022-10-21'
+output: html_document
+---
+
+# Part 0 - R Libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(factoextra)
+library(dbscan)
+library(randomForest)
+library(ggtree)
+library(phylotools)
+library(fastbaps)
+library(ggnewscale)
+library(cowplot)
+```
+
+# Part 1 - Assembly QC
+
+## Key Histograms
+
+```{r}
+pdf("Aim3_figure1.pdf")
+mbov_quast <- read.csv("transposed_report.csv", stringsAsFactors = FALSE)
+
+fig1_c <- mbov_quast %>% ggplot(aes(x = N50)) + 
+  geom_histogram()+ 
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text( vjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) + ggtitle("C")
+
+fig1_b <- mbov_quast %>% ggplot(aes(x = Total.length)) + 
+  geom_histogram()+ 
+  theme_minimal() + 
+  xlab("Total Genome Length (bps)") +
+  theme(
+    axis.text.x = element_text( vjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) + ggtitle("B")
+
+fig1_a <- mbov_quast %>% ggplot(aes(x = GC....)) + 
+  geom_histogram()+ 
+  xlab("GC% Content") + 
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text( vjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) + ggtitle("A")
+
+fig1_e <- mbov_quast %>% ggplot(aes(x = X..misassemblies)) + 
+  geom_histogram()+ 
+  theme_minimal() + 
+  xlab("No. of Misassemblies") +
+  theme(
+    axis.text.x = element_text( vjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) + ggtitle("E")
+
+fig1_d <- mbov_quast %>% ggplot(aes(x = X..contigs)) + 
+  geom_histogram()+ 
+  theme_minimal() +
+  xlab("No. of Contigs") + 
+  theme(
+    axis.text.x = element_text(vjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) + ggtitle("D")
+
+fig1 <- gridExtra::grid.arrange(fig1_a, fig1_b, fig1_c, fig1_d, ncol = 2)
+plot(fig1)
+
+dev.off()
+```
+
+## Filtering Scheme for Samples
+
+Boxplot of the N50 in relationship to sequencing instrument - and it seems like it did. The vast majority of the data that we possess was sequenced on a MiSeq. the second was a HiSeq. These sequences produced good N50s so maybe we just keep these samples and discard the other favorable ones.
+
+```{r}
+mbov_quast <- read.csv("transposed_report.csv", stringsAsFactors = FALSE)
+mbov_meta <- read.csv("/Users/noah_/Dissertation/Chap4/Aim3_InitialData.csv", stringsAsFactors = FALSE)
+
+mbov_quast$Run <- gsub(".scaffold","",mbov_quast$Assembly)
+
+mbov_quast_augmented <- mbov_quast %>% left_join(mbov_meta,by = "Run")
+
+mbov_quast_augmented %>% group_by(Instrument) %>% summarise(count = n())
+
+mbov_quast_augmented %>% ggplot(aes(x = Instrument, y = N50)) + 
+  geom_boxplot() + 
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) +
+  coord_flip()
+```
+
+We set a cut off of N50 minimum of 30000 bp and keeping Assemblies Making this change decreases our dataset to the number of 2798.
+
+```{r}
+nrow(subset(mbov_quast_augmented, N50 > 30000 & Instrument %in% c("Illumina MiSeq","Illumina HiSeq 2500")))
+```
+
+2732 when we keep sequences with a size in the range of 4200000 and 4800000
+
+```{r}
+nrow(subset(mbov_quast_augmented, N50 > 30000 & Instrument %in% c("Illumina MiSeq","Illumina HiSeq 2500") & Total.length > 4200000 & Total.length < 4800000))
+```
+
+We also made sure to include only sequences that were in a reasonable GC content for MTBC species 64% - 66%
+
+```{r}
+nrow(subset(mbov_quast_augmented, N50 > 30000 & Instrument %in% c("Illumina MiSeq","Illumina HiSeq 2500") & Total.length > 4200000 & Total.length < 4800000 & GC.... > 64 & GC.... < 66))
+```
+
+And finally, we wanted as complete assemblies as possible, we removed genomes that had contigs that were more than 250
+
+```{r}
+nrow(subset(mbov_quast_augmented, N50 > 30000 & Instrument %in% c("Illumina MiSeq","Illumina HiSeq 2500") & Total.length > 4200000 & Total.length < 4800000 & GC.... > 64 & GC.... < 66 & X..contigs < 250))
+```
+
+This leads to a genome assembly count of 2569 samples. Let's just save what we have so far
+
+```{r}
+aim3_data <- subset(mbov_quast_augmented, N50 > 30000 & Instrument %in% c("Illumina MiSeq","Illumina HiSeq 2500") & Total.length > 4200000 & Total.length < 4800000 & GC.... > 64 & GC.... < 66 & X..contigs < 250) %>% select(Run,Host,geo_loc_name_country,LibrarySelection,Center.Name)
+
+# Capybara
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Hydrochoerus hydrochaeris"),"Capybara",aim3_data$Host)
+
+# Sheep
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Ovis aries"),"Sheep",aim3_data$Host)
+
+# Canine 
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Canis lupus familiaris"),"Canine",aim3_data$Host)
+
+# Elephant
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Loxodonta"),"Elephant",aim3_data$Host)
+
+# Cattle
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("cattle","BOVINE","Cattle","Beef","Bos taurus","COW", "Dairy cattle", "Bovine", "Watusi", "Cheese", "Bison", "Bison bison athabascae", "cow", "Dairy cattle", "bovine"),"Cattle",aim3_data$Host)
+
+# Deer
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("DEER","Deer","Red deer","Cervine","Cervus elaphus","CERVINE","Cervid", "Dama dama", "Capreolus capreolus", "elk"),"Cervid",aim3_data$Host)
+
+# Porcine
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Wild boar","PORCINE", "Sus scrofa", "wild boar", "Pig", "Sus scrofa domesticus"),"Porcine",aim3_data$Host)
+
+# Llama
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Lama glama"),"Llama",aim3_data$Host)
+
+# Feline 
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Bobcat","Felis catus", "Feline", "Jaguar"),"Feline",aim3_data$Host)
+
+# Possum
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("POSSUM", "Possum", "Opossum"),"Possum",aim3_data$Host)
+
+# Goat
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Goat","goat","Capra hircus"),"Goat",aim3_data$Host)
+
+# Raccoon
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Raccoon","Racoon"),"Raccoon",aim3_data$Host)
+
+# Ferret
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("FERRET","Ferret"),"Ferret",aim3_data$Host)
+
+# Badger
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("BADGER"),"Badger",aim3_data$Host)
+
+# Human
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("Homo sapiens"),"Human",aim3_data$Host)
+
+# Stoat 
+aim3_data$Host <- ifelse(aim3_data$Host %in% c("STOAT", "Stoat"),"Stoat",aim3_data$Host)
+
+
+```
+
+```{r}
+write.csv(aim3_data,"/Users/noah_/Aim3_scripts/resources/Aim3_FilteredData.csv",quote = FALSE,row.names = FALSE)
+```
+
+# Part 2 - Pangenome PCA clusters
+
+## Unfiltered PCA
+
+```{r}
+### Takes a long time to run
+mbov_prefilt_prab <- read.csv("/Users/noah_/Aim3_scripts/mbov_prefilter_prab.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+prab_pca <- prcomp(mbov_prefilt_prab[,3152:ncol(mbov_prefilt_prab)])
+variance <- (prab_pca$sdev)^2
+loadings <- prab_pca$rotation
+scores <- prab_pca$x[,1:5]
+```
+
+```{r}
+scores <- as.data.frame(prab_pca$x[,1:5])
+scores$Name <- mbov_prefilt_prab$column
+
+scores <- scores %>% left_join(aim3_data,by = c("Name" = "Run"))
+
+mbov_pca_host_pre <- scores %>% ggplot(aes(PC1,PC2,color = Host)) + 
+  geom_point() + 
+  xlab(paste0("PC1 (",signif(variance[1],3),"%)")) + 
+    ylab(paste0("PC2 (",signif(variance[2],3),"%)")) + 
+ theme_minimal() + 
+  scale_color_discrete(name = "Host Species")
+
+```
+
+## MI Filtered PCA
+
+```{r}
+mbov_prab <- read.csv("/Users/noah_/Aim3_scripts/resources/Aim3_PRAB.csv", stringsAsFactors = FALSE)
+
+prab_pca <- prcomp(mbov_prab[,3:ncol(mbov_prab)])
+variance <- (prab_pca$sdev)^2
+loadings <- prab_pca$rotation
+scores <- prab_pca$x[,1:5]
+
+```
+
+Clustering with a Density based approach
+
+```{r}
+set.seed(5)
+scores <- as.data.frame(prab_pca$x[,1:5])
+mbov_clusters <- dbscan(scores[,1:2], 1, MinPts = 5)
+scores$dbscan <- mbov_clusters$cluster
+scores$Name <- gsub(".annot","",mbov_prab$Name)
+
+scores <- scores %>% left_join(aim3_data,by = c("Name" = "Run"))
+
+mbov_pca_dbscan <- scores %>% ggplot(aes(PC1,PC2,color = as.factor(dbscan))) + 
+  geom_point() + 
+  xlab("PC1") + 
+    ylab("PC2") + 
+ theme_minimal() + 
+  scale_color_discrete(name = "Clusters")
+
+mbov_pca_host <- scores %>% ggplot(aes(PC1,PC2,color = Host)) + 
+  geom_point() + 
+  xlab("PC1") + 
+    ylab("PC2") + 
+ theme_minimal() + 
+  scale_color_discrete(name = "Host")
+
+mbov_pca_geog <- scores %>% ggplot(aes(PC1,PC2,color = geo_loc_name_country)) + 
+  geom_point() + 
+  xlab("PC1") + 
+    ylab("PC2") + 
+ theme_minimal() + 
+  scale_color_discrete(name = "Country")
+```
+
+# Part 3 - Random Forest of Clusters & Feature Selection
+
+## Unfiltered Cluster data
+
+Let's do one iteration of RF to see how long this should take, given the PRAB data
+
+```{r}
+set.seed(111)
+mbov_prab <- read.csv("/Users/noah_/Aim3_scripts/resources/Aim3_PRAB.csv", stringsAsFactors = FALSE)
+
+scores <- as.data.frame(prab_pca$x[,1:5])
+mbov_clusters <- dbscan(scores[,1:2], 1, MinPts = 5)
+scores$dbscan <- mbov_clusters$cluster
+scores$Name <- gsub(mbov_prab$Name,".annot","")
+
+scores <- scores %>% left_join(mbov_meta,by = c("Name" = "Run"))
+
+rf_result <- randomForest(as.matrix(mbov_prab %>% select(-c(Name,X))), as.factor(scores$dbscan), ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+We have a pretty good model to differentiate these global clusters. We should next explore how each predictor contributes to a prediction.
+
+This might be a big computation, so we can use the variable importance data to first filter the top predictors, and then run the workflow
+
+Here is the importance if we filter on the mean decrease in accuracy
+
+```{r}
+rf_mda <- as.data.frame(rf_result$importance)
+
+rf_mda$gene <- rownames(rf_mda)
+rf_mda <- rf_mda %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy") %>% filter(DecreaseInAccuracy*100 > 1)
+
+gene2cluster <- rf_mda %>% ggplot(aes(x=gene,y=DecreaseInAccuracy)) +
+  geom_point(aes(color = cluster), size = 3, alpha = 6/10) + 
+  coord_flip()
+
+gene2cluster
+
+```
+
+## Filtered Clusters
+
+```{r}
+set.seed(111)
+mbov_prab <- read.csv("/Users/noah_/Aim3_scripts/resources/Aim3_PRAB.csv", stringsAsFactors = FALSE)
+
+scores <- as.data.frame(prab_pca$x[,1:5])
+mbov_clusters <- dbscan(scores[,1:2], 1, MinPts = 5)
+scores$dbscan <- mbov_clusters$cluster
+scores$Name <- mbov_prab$Name
+
+mbov_prab$cluster <- scores$dbscan 
+
+## Filtering occurs here
+mbov_prab <- mbov_prab %>% filter(cluster %in% c(1,2,3,4))
+mbov_clusters <- as.factor(mbov_prab$cluster)
+mbov_prab <- mbov_prab %>% select(-cluster)
+
+rf_result2 <- randomForest(as.matrix(mbov_prab %>% select(-c(Name,X))), mbov_clusters, ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+```{r}
+rf_mda <- as.data.frame(rf_result2$importance)
+
+rf_mda$gene <- rownames(rf_mda)
+rf_mda <- rf_mda %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy") %>% filter(DecreaseInAccuracy*100 > 1)
+
+gene2cluster <- rf_mda %>% ggplot(aes(x=gene,y=DecreaseInAccuracy)) +
+  geom_point(aes(color = cluster), size = 3, alpha = 6/10) + 
+  coord_flip()
+
+gene2cluster
+```
+
+## Filtered + Only using top predictors
+
+```{r}
+set.seed(111)
+
+### Get top COGs
+rf_mda <- as.data.frame(rf_result2$importance)
+
+rf_mda$gene <- rownames(rf_mda)
+rf_mda <- rf_mda %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy") %>% filter(DecreaseInAccuracy*100 > 1)
+
+top_pred_COGs <- unique(rf_mda$gene)
+
+mbov_prab <- read.csv("/Users/noah_/Aim3_scripts/resources/Aim3_PRAB.csv", stringsAsFactors = FALSE)
+
+scores <- as.data.frame(prab_pca$x[,1:5])
+mbov_clusters <- dbscan(scores[,1:2], 1, MinPts = 5)
+scores$dbscan <- mbov_clusters$cluster
+scores$Name <- mbov_prab$Name
+
+mbov_prab$cluster <- scores$dbscan 
+
+## Filtering occurs here
+mbov_prab <- mbov_prab %>% filter(cluster %in% c(1,2,3,4))
+mbov_clusters <- as.factor(mbov_prab$cluster)
+mbov_prab <- mbov_prab %>% select(-cluster)
+
+rf_result3 <- randomForest(as.matrix(mbov_prab %>% select(top_pred_COGs)), mbov_clusters, ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+```{r}
+rf_mda <- as.data.frame(rf_result3$importance)
+
+rf_mda$gene <- rownames(rf_mda)
+rf_mda <- rf_mda %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy") %>% filter(DecreaseInAccuracy*100 > 1)
+
+gene2cluster2 <- rf_mda %>% ggplot(aes(x=gene,y=DecreaseInAccuracy)) +
+  geom_point(aes(color = cluster), size = 3, alpha = 6/10) + 
+  coord_flip()
+
+gene2cluster2
+```
+
+Slightly better, but the accuracies are still lower than I anticipate. I think I need to actually get the features that are specifically influencing the difference between PC1 and PC2. The loadings might help with this!
+
+Also, the gini impurity metrics are actually pretty substantial here
+
+lets look at the loadings and determine genes that best contribute to the first two PCA results. We will do feature selection on these\
+\## Loading Filter
+
+```{r}
+as.data.frame(loadings[,1:2]) %>% ggplot(aes(x = PC1)) +
+  geom_histogram()
+
+as.data.frame(loadings[,1:2]) %>% ggplot(aes(x = PC2)) +
+  geom_histogram()
+
+pca_loadings_filt <- as.data.frame(loadings[,1:2]) %>% filter(abs(PC1) > 0.03 | abs(PC2) > 0.03)
+
+rf_filt <- rownames(pca_loadings_filt)
+```
+
+```{r}
+mbov_prab_loading <- read.csv("/Users/noah_/Aim3_scripts/resources/Aim3_PRAB.csv", stringsAsFactors = FALSE)
+mbov_prab_loading$cluster <- scores$dbscan 
+mbov_prab_loading <- mbov_prab_loading %>% filter(cluster %in% c(1,2,3,4))
+
+mbov_clusters <- as.factor(mbov_prab_loading$cluster)
+mbov_prab_loading <- mbov_prab_loading[,rf_filt]
+
+set.seed(123)
+rf_result <- randomForest(as.matrix(mbov_prab_loading %>% select(rf_filt)), mbov_clusters, ntree = 1000, do.trace = 50,importance = TRUE)
+
+
+rf_mda <- as.data.frame(rf_result$importance) %>% filter(MeanDecreaseAccuracy * 100 > 1)
+
+rf_mda$gene <- rownames(rf_mda)
+rf_mda <- rf_mda %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy")
+
+gene2cluster <- rf_mda %>% ggplot(aes(x=gene,y=DecreaseInAccuracy)) +
+  geom_point(aes(color = cluster), size = 3, alpha = 6/10) + 
+  coord_flip()
+
+gene2cluster
+
+```
+
+#Part 4 - Accessory Genome Stability
+
+I ran the above analysis one time for the filtered + top predictor methodology. I got some interesting results, but for one run, it could be possible that some genes only show up stochastically.
+
+I will redo the analysis 10 times and record the genes that are consistently showing up as important for the model.
+
+```{r}
+set.seed(1756)
+mbov_prab <- read.csv("/Users/noah_/Aim3_scripts/resources/Aim3_PRAB.csv", stringsAsFactors = FALSE)
+
+scores <- as.data.frame(prab_pca$x[,1:5])
+mbov_clusters <- dbscan(scores[,1:2], 1, MinPts = 5)
+scores$dbscan <- mbov_clusters$cluster
+scores$Name <- mbov_prab$Name
+
+mbov_prab$cluster <- scores$dbscan 
+
+## Filtering occurs here
+mbov_prab <- mbov_prab %>% filter(cluster %in% c(1,2,3,4))
+mbov_clusters <- as.factor(mbov_prab$cluster)
+mbov_prab <- mbov_prab %>% select(-cluster)
+```
+
+Let's do the RF analysis 10 times and capture the genes that are seen as important more than 70% of the time.
+
+```{r}
+
+for(i in 1:50){
+  # The ML part 
+  print(paste("iteration",i))
+  iteration_result <- randomForest(as.matrix(mbov_prab %>% select(-c(Name,X))), mbov_clusters, ntree = 1000, do.trace = 50,importance = TRUE)
+  #iteration_result$importance$gene <- rownames(iteration_result$importance)
+  iteration <- as.data.frame(iteration_result$importance) %>% filter(MeanDecreaseAccuracy * 100 > 1)
+  
+  
+  if( i == 1 ){
+    iteration$gene <- rownames(iteration)
+    stability_table <- iteration
+  } else {
+    iteration$gene <- rownames(iteration)
+    stability_table <- rbind(stability_table,iteration)
+  }
+}
+
+stability_table <- as.data.frame(stability_table)
+
+```
+
+# Part 5 - Phylogeny
+
+## First inspection
+
+```{r}
+mbov_core <- read.tree("mbov_coresnp_unique.contree")
+
+mbov_core_tree <- ggtree(mbov_core)
+```
+
+if you visualize the tree, it becomes apparent that there are a few taxa with unusually large branch lengths. I will next investigate these isolates, get their associated metadata and record them for removal
+
+```{r}
+mbov_core_taxa <- subset(mbov_core_tree$data, isTip == TRUE)
+
+br_length_hist <- mbov_core_taxa %>% ggplot(aes(x = branch.length)) + 
+  geom_histogram(bins = 50)
+```
+
+I believe that if we filter out the taxa with branch lengths above 0.0010, we would have a more realistic phylogeny of global M. bovis. I will record the isolate id and metadata
+
+```{r}
+mbov_outlier_taxa <- mbov_core_taxa %>% filter(branch.length > 0.0010) %>% select(label)
+
+mbov_meta %>% filter(Run %in% mbov_outlier_taxa$label) %>% select(Run,Host,geo_loc_name_country)
+```
+
+It would be easier to just remove these isolates and do one last iqtree run! after this we can infer the population clusters and plot the information of the metadata
+
+```{r}
+phylip <- read.phylip("/Users/noah_/Aim3_scripts/resources/mbov_coresnp_normalseqs.phy")
+dat2fasta(phylip, outfile = "/Users/noah_/Aim3_scripts/resources/mbov_coresnp_normalseqs.fasta")
+```
+
+Let's look at new tree. Removed sequences with redundant sequences, cleaned up the sequences with snp-sites and used that as input for IQtree
+
+```{r}
+mbov_core <- read.tree("mbov_coresnp_snpsitecleaned.contree")
+mbov_core_tree <- ggtree(mbov_core)
+```
+
+let's inspect nodal support. 1349/1406 internal nodes had a ultrafast bootstrap value of 100, 55 had value of 99, and 2 were 98
+
+## fastBAPS sub-populations
+
+Let's visualize the breakdown of the sub-populations with the phylogeny
+
+```{r}
+sparse.data <- import_fasta_sparse_nt("mbov_coresnp_snpsitecleaned.fasta")
+sparse.data <- optimise_prior(sparse.data, type = "optimise.symmetric")
+baps.hc <- fast_baps(sparse.data)
+best.partition <- best_baps_partition(sparse.data, baps.hc)
+plot.df <- data.frame(id = colnames(sparse.data$snp.matrix), fastbaps = best.partition, 
+    stringsAsFactors = FALSE)
+```
+
+```{r}
+mbov_coretree_fastbap_annot <- facet_plot(mbov_core_tree, panel = "fastbaps", data = plot.df, geom = geom_tile, aes(x = fastbaps), 
+    color = "blue")
+```
+
+With the data in hand, we can simply annotate the tree with the subpopulation data
+
+```{r}
+mbov_core <- read.tree("mbov_coresnp_snpsitecleaned.contree")
+
+mbov_core_tree <- ggtree(mbov_core, layout = "circular") %<+% plot.df +
+   geom_tippoint(aes(color=as.factor(fastbaps))) + 
+     scale_color_manual("Population Clusters",values = hcl.colors(7, "Zissou 1")) + 
+  theme(legend.title = element_text(size = 15),
+        legend.text = element_text(size = 13))
+
+baps_heat <- as.data.frame(as.factor(plot.df$fastbaps))
+rownames(baps_heat) <- plot.df$id
+
+baps_col <- hcl.colors(7, "Zissou 1")
+
+t1 <- gheatmap(mbov_core_tree,baps_heat, colnames = FALSE, offset = -0.00001, width = 0.075) + scale_fill_manual(values = baps_col, name = "Population Clusters")
+```
+
+## Characterizing the overlap between fastBAPs, geographic origin, and species
+
+let's join all of our metadata together. We can next just visualize the structuring of the data in 3 separate phylogenies
+
+```{r}
+full_mbov_meta <- plot.df %>% left_join(aim3_data, by = c("id" = "Run"))
+rownames(full_mbov_meta) <- full_mbov_meta$id
+```
+
+### Host
+
+```{r}
+mbov_core_species <- ggtree(mbov_core) %<+% full_mbov_meta +
+   geom_tippoint(aes(color=as.factor(Host))) + 
+     scale_color_manual("Host Species", values = hcl.colors(14, "Zissou 1")) + 
+  theme(legend.title = element_text(size = 15),
+        legend.text = element_text(size = 13))
+```
+
+### Geographic
+
+```{r}
+mbov_core_country <- ggtree(mbov_core) %<+% full_mbov_meta +
+   geom_tippoint(aes(color=as.factor(geo_loc_name_country))) + 
+     scale_color_manual("Country of Origin", values = hcl.colors(16, "Zissou 1")) + 
+  theme(legend.title = element_text(size = 15),
+        legend.text = element_text(size = 13))
+```
+
+### Lineage + fastbaps
+
+#### Heatmap + tips colored
+
+```{r}
+mbov_core <- read.tree("mbov_coresnp_snpsitecleaned.contree")
+mbov_core <- drop.tip(mbov_core,"Reference")
+
+mbov_core_tree <- ggtree(mbov_core, layout = "circular") %<+% plot.df + geom_tippoint(aes(color=as.factor(fastbaps))) +
+  scale_color_manual("Population Clusters",values = hcl.colors(7, "Roma")) + 
+  geom_treescale(linesize = 0.75, fontsize = 6) +
+  
+  theme(legend.title = element_text(size = 15),
+        legend.text = element_text(size = 13))
+
+lineage_info <- read.csv("/Users/noah_/Aim3_scripts/resources/mbov_lineage_info.txt", header = FALSE)
+
+colnames(lineage_info) <- c("id","lineage")
+rownames(lineage_info) <- lineage_info$id 
+
+plot.df <- data.frame(id = colnames(sparse.data$snp.matrix), fastbaps = best.partition, 
+    stringsAsFactors = FALSE)
+
+plot.df <- plot.df %>% left_join(lineage_info,by = "id")
+
+# 
+lineage_heat <- plot.df %>% select(lineage)
+rownames(lineage_heat) <- plot.df$id
+
+lineage_col <- hcl.colors(11, "Zissou 1")
+
+t1 <- gheatmap(mbov_core_tree,lineage_heat, colnames = FALSE, offset = -0.00001, width = 0.075) + scale_fill_manual(values = lineage_col, name = "Lineages")
+```
+
+#### Double Heatmap
+
+```{r}
+mbov_core <- read.tree("mbov_coresnp_snpsitecleaned.contree")
+mbov_core <- drop.tip(mbov_core,"Reference")
+
+mbov_core_tree <- ggtree(mbov_core, layout = "circular") %<+% plot.df  + 
+  geom_treescale(linesize = 0.75, fontsize = 6) +
+  
+  theme(legend.title = element_text(size = 15),
+        legend.text = element_text(size = 13))
+
+baps_heat <- as.data.frame(as.factor(plot.df$fastbaps))
+rownames(baps_heat) <- plot.df$id
+
+baps_col <- hcl.colors(7, "Roma")
+
+lineage_info <- read.csv("/Users/noah_/Aim3_scripts/resources/mbov_lineage_info.txt", header = FALSE)
+
+colnames(lineage_info) <- c("id","lineage")
+rownames(lineage_info) <- lineage_info$id 
+
+plot.df <- data.frame(id = colnames(sparse.data$snp.matrix), fastbaps = best.partition, 
+    stringsAsFactors = FALSE)
+
+plot.df <- plot.df %>% left_join(lineage_info,by = "id")
+
+# 
+lineage_heat <- plot.df %>% select(lineage)
+rownames(lineage_heat) <- plot.df$id
+
+lineage_col <- hcl.colors(11, "Zissou 1")
+
+t1 <- gheatmap(mbov_core_tree,lineage_heat, colnames = FALSE, offset = -0.00001, width = 0.075) + scale_fill_manual(values = lineage_col, name = "Lineages")
+
+t1_tmp <- t1 + new_scale_fill()
+t2 <- gheatmap(t1_tmp,baps_heat, width = 0.075, offset = 0.0005, colnames = FALSE,legend_title = "Population Cluster") + scale_fill_manual(values = baps_col, name = "Population Cluster")
+```
+
+# Part 6 - Random Forest of Core SNPs
+
+## Loading and cleaning
+
+Snippy outputs the data of SNPs that are part of the core genome with location data in relation to the reference genome.
+
+Let's load the data in and then clean it up for eventual machine learning tasks
+
+```{r}
+mbov_coresnp <- t(read.table("/Users/noah_/Aim3_scripts/resources/core.tab", header = TRUE))
+
+colnames(mbov_coresnp) <- mbov_coresnp[2,]
+
+mbov_coresnp <- mbov_coresnp[-c(1,2,3),]
+mbov_coresnp <- as.data.frame(mbov_coresnp)
+
+
+mbov_coresnp$id <- rownames(mbov_coresnp)
+
+# link with plot.df
+
+lineage_info <- read.csv("/Users/noah_/Aim3_scripts/resources/mbov_lineage_info.txt", header = FALSE)
+
+colnames(lineage_info) <- c("id","lineage")
+rownames(lineage_info) <- lineage_info$id 
+
+plot.df <- data.frame(id = colnames(sparse.data$snp.matrix), fastbaps = best.partition, 
+    stringsAsFactors = FALSE)
+
+plot.df.coresnp <- plot.df %>% left_join(mbov_coresnp, by = "id")
+```
+
+## Dataset for Random Forest
+
+### Remove Correlated Predictors
+
+```{r}
+write.csv(plot.df.coresnp,"/Users/noah_/Aim3_scripts/resources/mbov_coresnp.csv",row.names = FALSE,quote = FALSE)
+```
+
+The dataset is now appropriate for doing our ML analysis. To reduce the amount of predictors, I will focus on removing highly correlated predictors
+
+```{r}
+
+mbov_core <- read.csv("/Users/noah_/Aim3_scripts/resources/mbov_coresnp.csv", stringsAsFactors = FALSE, header = TRUE)[-1,]
+```
+
+```{r}
+# lonnnnggggg calculation 
+remove_index <- c()
+
+for(i in 1:ncol(mbov_core)){
+  for(j in 1:ncol(mbov_core)){
+    #skip if number is in the remove_index variable
+    if(j %in% remove_index){
+      next
+    }
+    
+    #skip redundant comparisons
+    if(i >= j){
+      next
+    }
+    
+    #skip if the data is from fastbaps or lineage
+    else if(colnames(mbov_core)[i] %in% c("fastbaps","lineage","id") || colnames(mbov_core)[j] %in% c("fastbaps","lineage","id")){
+      next
+    }
+    
+    #skip if not enough to compare
+    else if(length(unique(mbov_core[,i])) == 1 || length(unique(mbov_core[,j])) == 1){
+      next
+    }
+    else{
+      chisq <- suppressWarnings(fisher.test(mbov_core[,i],mbov_core[,j])$p.value)
+      if(chisq > (0.05)){
+        next 
+      }
+      
+      else{
+        print(paste(i,j,chisq))
+        remove_index <- append(remove_index,j)
+        
+      }
+    }
+    
+  }
+}
+```
+
+Cleaning led to 610 variables being kept
+
+```{r}
+mbov_core.cleaned <- mbov_core[,-remove_index] 
+
+write.csv(mbov_core.cleaned,"/Users/noah_/Aim3_scripts/resources/mbov_core_cleaned.csv",quote = FALSE,row.names = FALSE)
+```
+
+## Random Forest Analysis - Lineages
+
+Let's run a random forest analysis on the remaining predictors
+
+```{r}
+rf_snp_result <- randomForest(mbov_core.cleaned %>% dplyr::select(-c(id,lineage,fastbaps)) %>% mutate_if(is.character,as.factor), as.factor(mbov_core$lineage), ntree = 500, do.trace = 50,importance = TRUE)
+```
+
+### subsample data 
+
+Very interesting, the lineage La1.8.1 seems to dominate the calculation. I will subsample and run the analysis again 
+
+```{r}
+set.seed(740)
+la181_subsample <- mbov_core.cleaned %>% filter(lineage == "La1.8.1") %>% sample_n(50)
+exclude_la181 <- mbov_core.cleaned %>% filter(lineage != "La1.8.1")
+
+mbov_core.subsamp <- rbind(la181_subsample,exclude_la181)
+mbov_core.subsamp <- mbov_core.subsamp[sample(nrow(mbov_core.subsamp)),]
+```
+
+
+```{r}
+rf_snp_subsamp_result <- randomForest(mbov_core.subsamp %>% dplyr::select(-c(id,lineage,fastbaps)), as.factor(mbov_core.subsamp$lineage), ntree = 500, do.trace = 50,importance = TRUE)
+```
+Subsampling made the results worse. I think we can write about here that the diversity we find in the lineages are mostly concentrated in La1.8.1 - the other isolates are not as predictable based on SNPs alone. 
+
+## Random Forest Analysis - Population Clusters
+```{r}
+rf_snp_result_pc <- randomForest(mbov_core.cleaned %>% dplyr::select(-c(id,lineage,fastbaps)) , as.factor(mbov_core$fastbaps), ntree = 500, do.trace = 50,importance = TRUE)
+```
+These models are not the best! I think I need to run a ML model on the full data instead of just the non-associated SNPs. Should be interesting
+
+## Random Forest - Full Data - Population Clusters
+
+```{r}
+
+rf_snp_full_pc <- randomForest(mbov_core %>% dplyr::select(-c(id,lineage,fastbaps)) , as.factor(mbov_core$fastbaps), ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+Accuracies are way better, this might be useful if we select the features appropriately  
+
+### Second Pass - Skip this 
+
+```{r}
+SNP_data <- as.data.frame(rf_snp_full_pc$importance)
+feature_select <- rownames(SNP_data %>% filter(MeanDecreaseAccuracy*100 > 1))
+
+mbov_core.clean <- mbov_core[,feature_select]
+rf_clean_pc <- randomForest(mbov_core.clean, as.factor(mbov_core$fastbaps), ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+
+### Analyze the results 
+
+```{r}
+
+SNP_data <- as.data.frame(rf_snp_full_pc$importance)
+SNP_data$gene <- rownames(SNP_data)
+SNP_data <- SNP_data %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy") %>% filter(DecreaseInAccuracy*100 > 1)
+
+SNP_data$snp_location <- as.numeric(gsub("X","",SNP_data$gene))
+SNP_data$snp_loc_plus1 <- SNP_data$snp_location + 1
+
+pdf(file = "/Users/noah_/Aim3_scripts/resources/Aim3_CoreGenomeResults_Facet.pdf")
+SNP2cluster <- SNP_data %>%   ggplot(aes(x=as.character(snp_location),y=DecreaseInAccuracy)) +
+  geom_point( size = 3, alpha = 6/10) + 
+  facet_wrap(~cluster, nrow = 3) +
+  coord_flip()
+
+SNP2cluster
+dev.off()
+```
+
+I would like to print everything as a separate page preferably
+
+```{r}
+pdf(file = "/Users/noah_/Aim3_scripts/resources/Aim3_CoreGenomeResults_MultiPage.pdf")
+
+for (i in 1:7){
+SNP2cluster <- SNP_data %>% filter(cluster == i) %>% ggplot(aes(x=as.character(snp_location),y=DecreaseInAccuracy)) +
+  geom_point(size = 3, alpha = 6/10) + 
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) +
+  coord_flip() + 
+  ggtitle(paste("Cluster", i)) + 
+  xlab("Gene") + 
+  ylab("Decrease in Accuracy")
+
+plot(SNP2cluster)
+}
+dev.off()
+```
+
+We need to identify where the SNP locations overlap with - we can achieve this BEDtools 
+
+```{r}
+SNP_data$chr <- "LT708304.1"
+write.table(SNP_data %>% select(chr,snp_location,snp_loc_plus1),"/Users/noah_/Aim3_scripts/resources/mbov_coresnp_loc.bed",sep = "\t",row.names = FALSE, quote = FALSE)
+
+```
+
+And now we just need to clean up the dataset that I developed 
+
+```{r}
+mbov_core_overlap <- read.table("/Users/noah_/Aim3_scripts/resources/mbov_overlapping_genes_Aim3.txt",header = FALSE, stringsAsFactors = FALSE)
+
+library(stringr)
+string <- mbov_core_overlap$V9
+mbov_core_overlap$gene_name <- gsub(";Name=","",str_extract(string, "(?=;Name).*(?=;gbkey)"))
+```
+
+a quick left join and we can recreate the figure, but then we need to label the noncoding regions 
+
+```{r}
+SNP_data_ext <- SNP_data %>% left_join(mbov_core_overlap, by = c("snp_location" = "V11"))
+
+noncoding_snps <- SNP_data_ext[which(is.na(SNP_data_ext$gene_name)),]
+
+noncoding_snps$gene_name <- paste0("nc-", noncoding_snps$snp_location)
+
+coding_snps <- SNP_data_ext[which(!is.na(SNP_data_ext$gene_name)),]
+
+SNP_data_ext <- rbind(coding_snps,noncoding_snps)
+```
+
+That's all!
+
+```{r}
+pdf(file = "/Users/noah_/Aim3_scripts/resources/Aim3_CoreGenomeResults_MultiPage.pdf")
+
+for (i in 1:7){
+SNP2cluster <- SNP_data_ext %>% filter(cluster == i) %>% ggplot(aes(x=gene_name,y=DecreaseInAccuracy*100)) +
+  geom_point(size = 3, alpha = 6/10) + 
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) +
+  ylim(c(0,15)) + 
+  coord_flip() + 
+  ggtitle(paste("Cluster", i)) + 
+  xlab("Gene") + 
+  ylab("Decrease in Accuracy")
+
+plot(SNP2cluster)
+}
+dev.off()
+```
+
+```{r}
+pdf(file = "/Users/noah_/Aim3_scripts/resources/Aim3_CoreGenomeResults_SinglePage.pdf",
+    height = 20,
+    width = 13)
+
+cgp <- list()
+for (i in 1:7){
+cgp[[i]] <- SNP_data_ext %>% filter(cluster == i) %>% ggplot(aes(x=gene_name,y=DecreaseInAccuracy*100)) +
+  geom_point(size = 3, alpha = 6/10) + 
+  theme_minimal() + 
+  theme(
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    axis.line = element_line(color = "black")
+  ) +
+  ylim(c(0,15)) + 
+  coord_flip() + 
+  ggtitle(paste("Cluster", i)) + 
+  xlab("Gene") + 
+  ylab("Decrease in Accuracy")
+
+}
+
+plot_grid(cgp[[1]],cgp[[2]],cgp[[3]],cgp[[4]],cgp[[5]],cgp[[6]],cgp[[7]], ncol = 2, align = "v")
+
+dev.off()
+```
+
+## Random Forest - Full Data - Lineages 
+
+```{r}
+
+rf_snp_full_lin <- randomForest(mbov_core %>% dplyr::select(-c(id,lineage,fastbaps)) , as.factor(mbov_core$lineage), ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+Accuracies are way better, this might be useful if we select the features appropriately  
+
+### Second Pass
+
+```{r}
+SNP_data_lin <- as.data.frame(rf_snp_full_lin$importance)
+feature_select <- rownames(SNP_data_lin %>% filter(MeanDecreaseAccuracy*100 > 1))
+
+mbov_core.clean.lin <- mbov_core[,feature_select]
+rf_clean_lin <- randomForest(mbov_core.clean.lin, as.factor(mbov_core$lineage), ntree = 1000, do.trace = 50,importance = TRUE)
+```
+
+### Analyze Data
+
+```{r}
+
+SNP_data_lin <- as.data.frame(rf_snp_full_lin$importance)
+SNP_data_lin$gene <- rownames(SNP_data_lin)
+SNP_data_lin <- SNP_data_lin %>%
+  pivot_longer(!c(gene,MeanDecreaseAccuracy,MeanDecreaseGini), names_to = "cluster", values_to = "DecreaseInAccuracy") %>% filter(DecreaseInAccuracy*100 > 1)
+
+SNP2cluster_lin <- SNP_data_lin %>% ggplot(aes(x=gene,y=DecreaseInAccuracy)) +
+  geom_point(aes(color = cluster), size = 3, alpha = 6/10) + 
+  coord_flip()
+
+SNP2cluster_lin
+```
+
+# Part 7 - Scoary Analysis 
+## Fixing the PRAB matrix
+
+```{r}
+mbov_prab <- read.csv("/Users/noah_/Aim3_scripts/resources/gene_presence_absence_roary.csv",stringsAsFactors = FALSE,)
+```
+
+Get the isolates that are in the tree
+```{r}
+mbov_core <- read.tree("mbov_coresnp_snpsitecleaned.contree")
+mbov_core <- drop.tip(mbov_core,"Reference")
+
+mbov_core_tree <- ggtree(mbov_core)
+
+columns_to_keep <- subset(mbov_core_tree$data, isTip == TRUE)$label
+```
+
+```{r}
+prab_only <- mbov_prab[,15:ncol(mbov_prab)]
+colnames(prab_only) <- gsub(".annot","",colnames(prab_only))
+
+#keep only the labels that occur in the tree
+prab_only <- prab_only[,columns_to_keep]
+info_only <- mbov_prab[,1:14]
+
+mbov_prab_scoary <- cbind(info_only,prab_only)
+```
+
+## Create the fastBAPs break down 
+```{r}
+
+```
+
+# Part X - Misc
+
+```{r}
+var_df <- data.frame(var = variance[1:10],                   names = paste0("PC",1:10))
+
+mbov_pca_perc_variance <- var_df %>% ggplot(aes(x = reorder(names, -var),y = var)) + 
+ geom_col() + 
+ theme_minimal() + 
+ xlab("Principal Components") + 
+ ylab("Percent of Explained Variance")
+```
